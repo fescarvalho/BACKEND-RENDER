@@ -38,24 +38,20 @@ const allowedOrigins = [
 // 4. Configuração do Socket.io
 const io = new socket_io_1.Server(httpServer, {
     cors: {
-        origin: allowedOrigins, // O Socket usa a mesma lista de domínios
+        // No Render, você precisa liberar explicitamente o seu Frontend da Vercel
+        origin: [
+            "https://leandro-abreu-contabilidade.vercel.app", // Seu Front na Vercel
+            "http://localhost:5173" // Seu teste local
+        ],
         methods: ["GET", "POST"]
     }
 });
 exports.io = io;
-// 5. Lógica de conexão do Socket
 io.on("connection", (socket) => {
-    console.log(`🔌 Cliente conectado no Socket: ${socket.id}`);
-    // O cliente (Frontend) vai pedir para entrar na sala dele: "join_room", 10
+    console.log(`🔌 Cliente conectado: ${socket.id}`);
     socket.on("join_room", (userId) => {
-        if (userId) {
-            const roomName = `user_${userId}`;
-            socket.join(roomName);
-            console.log(`👤 Usuário ${userId} entrou na sala ${roomName}`);
-        }
-    });
-    socket.on("disconnect", () => {
-        console.log("❌ Cliente desconectou.");
+        socket.join(`user_${userId}`);
+        console.log(`👤 User ${userId} entrou na sala.`);
     });
 });
 app.set('trust proxy', 1);
@@ -79,9 +75,6 @@ app.use(auth_routes_1.default);
 app.use(docs_routes_1.default);
 const PORT = process.env.PORT || 3000;
 // 7. IMPORTANTE: Trocamos app.listen por httpServer.listen
-if (process.env.NODE_ENV !== 'production') {
-    httpServer.listen(PORT, () => {
-        console.log(`🚀 SERVIDOR RODANDO LOCALMENTE NA PORTA ${PORT}`);
-    });
-}
-exports.default = app;
+httpServer.listen(PORT, () => {
+    console.log(`🚀 SERVIDOR RODANDO NA PORTA ${PORT}`);
+});
