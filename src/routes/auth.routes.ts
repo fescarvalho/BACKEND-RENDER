@@ -1,8 +1,9 @@
 import { Router, Request, Response } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { prisma } from "../lib/prisma"; // ✅ Importando o Prisma
-import { del } from "@vercel/blob";
+import { prisma } from "../lib/prisma";
+// REMOVIDO: import { del } from "@vercel/blob";
+import { deleteFromR2 } from "../services/storage"; // ✅ NOVA IMPORTAÇÃO
 import { verificarToken, AuthRequest } from "../middlewares/auth";
 import { enviarEmailRecuperacao } from "../services/emailService";
 import rateLimit from "express-rate-limit";
@@ -77,7 +78,6 @@ router.post(
           telefone,
           tipo_usuario: "cliente",
         },
-        // Seleciona o que retornar para não mandar a senha de volta
         select: { id: true, nome: true, email: true, telefone: true },
       });
 
@@ -159,7 +159,7 @@ router.get("/clientes", verificarToken, async (req: AuthRequest, res: Response) 
 });
 
 // ======================================================
-// 4. DELETAR USUÁRIO
+// 4. DELETAR USUÁRIO (ATUALIZADO PARA R2) ✅
 // ======================================================
 router.delete("/users/:id", verificarToken, async (req: AuthRequest, res: Response) => {
   const { id } = req.params;
@@ -174,30 +174,36 @@ router.delete("/users/:id", verificarToken, async (req: AuthRequest, res: Respon
       return res.status(400).json({ msg: "Você não pode deletar sua própria conta." });
     }
 
-    // 1. Busca arquivos do cliente para apagar do Blob (Vercel)
+    // 1. Busca arquivos do cliente para apagar do Cloudflare R2
+    // ATENÇÃO: Verifique se no seu banco o campo é 'userId' ou 'user_id'
+    // Mantive 'user_id' conforme seu código original.
     const arquivosDoCliente = await prisma.documents.findMany({
-      where: { user_id: Number(id) },
+      where: { user_id: Number(id) }, 
       select: { url_arquivo: true },
     });
 
-    for (const doc of arquivosDoCliente) {
-      if (doc.url_arquivo) {
-        try {
-          await del(doc.url_arquivo, { token: process.env.BLOB_READ_WRITE_TOKEN });
-        } catch (error) {
-          console.error(`Erro ao apagar arquivo ${doc.url_arquivo}:`, error);
-        }
-      }
+    // 2. Apaga arquivos do R2 em paralelo (Muito mais rápido)
+    if (arquivosDoCliente.length > 0) {
+      console.log(`🗑️ Apagando ${arquivosDoCliente.length} arquivos do Storage...`);
+      
+      const promises = arquivosDoCliente
+        .filter(doc => doc.url_arquivo) // Filtra se tiver url nula
+        .map(doc => deleteFromR2(doc.url_arquivo)); // Chama a função nova
+      
+      await Promise.all(promises);
     }
 
-    // 2. Apaga registros de documentos no banco
+    // 3. Apaga Notificações (Opcional, se não tiver Cascade no banco)
+    await prisma.notifications.deleteMany({
+        where: { user_id: Number(id) }
+    });
+
+    // 4. Apaga registros de documentos no banco
     await prisma.documents.deleteMany({
       where: { user_id: Number(id) },
     });
 
-    // 3. Apaga o usuário
-    // O Prisma lança erro se não achar, então usamos try/catch ou verificamos antes.
-    // O delete lança erro se o registro não existir.
+    // 5. Apaga o usuário
     try {
       const usuarioDeletado = await prisma.users.delete({
         where: { id: Number(id) },
@@ -208,7 +214,6 @@ router.delete("/users/:id", verificarToken, async (req: AuthRequest, res: Respon
       });
     } catch (e: any) {
       if (e.code === "P2025") {
-        // Código Prisma para "Record not found"
         return res.status(404).json({ msg: "Usuário não encontrado." });
       }
       throw e;
@@ -250,7 +255,6 @@ router.put("/users/:id", verificarToken, async (req: AuthRequest, res: Response)
     });
   } catch (err: any) {
     console.error(err);
-    // P2002 é o código do Prisma para violação de Unique Constraint (Email ou CPF já existe)
     if (err.code === "P2002") {
       return res
         .status(400)

@@ -5,12 +5,14 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const multer_1 = __importDefault(require("multer"));
-const blob_1 = require("@vercel/blob");
+// REMOVIDO: import { put, del } from "@vercel/blob"; 
+const storage_1 = require("../services/storage"); // ✅ NOVA IMPORTAÇÃO
 const prisma_1 = require("../lib/prisma");
 const DocumentRepository_1 = require("../repositories/DocumentRepository");
 const emailService_1 = require("../services/emailService");
 const auth_1 = require("../middlewares/auth");
 const validateResource_1 = require("../middlewares/validateResource");
+const storage_2 = require("../services/storage"); // <--- Adicione isso
 const NotificationRepository_1 = require("../repositories/NotificationRepository");
 const server_1 = require("../server");
 const docSchemas_1 = require("../schemas/docSchemas");
@@ -45,7 +47,7 @@ router.get("/meus-documentos", auth_1.verificarToken, async (req, res) => {
     }
 });
 // ======================================================
-// 2. UPLOAD (POST) - COM NOTIFICAÇÃO ✅
+// 2. UPLOAD (POST) - AGORA COM R2 ✅
 // ======================================================
 router.post("/upload", auth_1.verificarToken, upload.single("arquivo"), (0, validateResource_1.validate)(docSchemas_1.uploadSchema), async (req, res) => {
     try {
@@ -65,15 +67,13 @@ router.post("/upload", auth_1.verificarToken, upload.single("arquivo"), (0, vali
                 .status(404)
                 .json({ msg: `Erro: O cliente com ID ${cliente_id} não existe.` });
         }
-        const blob = await (0, blob_1.put)(file.originalname, file.buffer, {
-            access: "public",
-            token: process.env.BLOB_READ_WRITE_TOKEN,
-            addRandomSuffix: true,
-        });
+        // ✅ ALTERADO: Upload para o Cloudflare R2
+        // Usamos o cliente_id como "OfficeId" temporário para organizar as pastas
+        const urlArquivo = await (0, storage_1.uploadToR2)(file, String(cliente_id), String(cliente_id));
         const novoDoc = await DocumentRepository_1.DocumentRepository.create({
             userId: Number(cliente_id),
             titulo: titulo,
-            url: blob.url,
+            url: urlArquivo, // ✅ URL do R2
             nomeOriginal: file.originalname,
             tamanho: file.size,
             formato: file.mimetype,
@@ -86,8 +86,7 @@ router.post("/upload", auth_1.verificarToken, upload.single("arquivo"), (0, vali
         // ✅ LÓGICA DE NOTIFICAÇÃO (PERSISTÊNCIA + SOCKET)
         try {
             // 1. Salvar no Banco
-            const novaNotificacao = await NotificationRepository_1.NotificationRepository.create(Number(cliente_id), "Novo Documento Recebido", `O documento "${titulo}" foi adicionado.`, novoDoc.url_arquivo // Link para o doc
-            );
+            const novaNotificacao = await NotificationRepository_1.NotificationRepository.create(Number(cliente_id), "Novo Documento Recebido", `O documento "${titulo}" foi adicionado.`, novoDoc.url_arquivo);
             // 2. Disparar Socket em Tempo Real
             server_1.io.to(`user_${cliente_id}`).emit("nova_notificacao", {
                 id: novaNotificacao.id,
@@ -114,23 +113,33 @@ router.post("/upload", auth_1.verificarToken, upload.single("arquivo"), (0, vali
 // ======================================================
 // 3. DELETAR DOCUMENTO
 // ======================================================
+// ======================================================
+// 3. DELETAR DOCUMENTO (Atualizado para R2)
+// ======================================================
 router.delete("/documentos/:id", auth_1.verificarToken, (0, validateResource_1.validate)(docSchemas_1.deleteDocumentSchema), async (req, res) => {
     const { id } = req.params;
     try {
+        // 1. Verificação de segurança (Apenas Admin)
         if (!req.userId || !(await checkAdmin(req.userId))) {
             return res.status(403).json({ msg: "Acesso negado." });
         }
+        // 2. Busca o documento para pegar a URL
         const documento = await DocumentRepository_1.DocumentRepository.findById(Number(id));
-        if (!documento)
+        if (!documento) {
             return res.status(404).json({ msg: "Documento não encontrado." });
+        }
+        // 3. Apaga do Cloudflare R2
         if (documento.url_arquivo) {
             try {
-                await (0, blob_1.del)(documento.url_arquivo, { token: process.env.BLOB_READ_WRITE_TOKEN });
+                // A função deleteFromR2 já trata erros internamente, mas o await garante
+                // que tentamos apagar antes de remover do banco.
+                await (0, storage_2.deleteFromR2)(documento.url_arquivo);
             }
             catch (error) {
-                console.error("Erro ao apagar do Blob:", error);
+                console.error("Erro ao apagar do Storage (arquivo órfão):", error);
             }
         }
+        // 4. Apaga do Banco de Dados
         await DocumentRepository_1.DocumentRepository.delete(Number(id));
         return res.json({ msg: "Documento apagado com sucesso." });
     }

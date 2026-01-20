@@ -1,11 +1,13 @@
 import { Router, Response } from "express";
 import multer from "multer";
-import { put, del } from "@vercel/blob";
+// REMOVIDO: import { put, del } from "@vercel/blob"; 
+import { uploadToR2 } from "../services/storage"; // ✅ NOVA IMPORTAÇÃO
 import { prisma } from "../lib/prisma";
 import { DocumentRepository } from "../repositories/DocumentRepository";
 import { enviarEmailNovoDocumento } from "../services/emailService";
 import { verificarToken, AuthRequest } from "../middlewares/auth";
 import { validate } from "../middlewares/validateResource";
+import { deleteFromR2 } from "../services/storage"; // <--- Adicione isso
 
 import { NotificationRepository } from '../repositories/NotificationRepository';
 import { io } from '../server'; 
@@ -65,7 +67,7 @@ router.get(
 );
 
 // ======================================================
-// 2. UPLOAD (POST) - COM NOTIFICAÇÃO ✅
+// 2. UPLOAD (POST) - AGORA COM R2 ✅
 // ======================================================
 router.post(
   "/upload",
@@ -95,16 +97,14 @@ router.post(
           .json({ msg: `Erro: O cliente com ID ${cliente_id} não existe.` });
       }
 
-      const blob = await put(file.originalname, file.buffer, {
-        access: "public",
-        token: process.env.BLOB_READ_WRITE_TOKEN,
-        addRandomSuffix: true,
-      });
+      // ✅ ALTERADO: Upload para o Cloudflare R2
+      // Usamos o cliente_id como "OfficeId" temporário para organizar as pastas
+      const urlArquivo = await uploadToR2(file, String(cliente_id), String(cliente_id));
 
       const novoDoc = await DocumentRepository.create({
         userId: Number(cliente_id),
         titulo: titulo,
-        url: blob.url,
+        url: urlArquivo, // ✅ URL do R2
         nomeOriginal: file.originalname,
         tamanho: file.size,
         formato: file.mimetype,
@@ -125,7 +125,7 @@ router.post(
           Number(cliente_id),
           "Novo Documento Recebido",
           `O documento "${titulo}" foi adicionado.`,
-          novoDoc.url_arquivo // Link para o doc
+          novoDoc.url_arquivo 
         );
 
         // 2. Disparar Socket em Tempo Real
@@ -156,6 +156,9 @@ router.post(
 // ======================================================
 // 3. DELETAR DOCUMENTO
 // ======================================================
+// ======================================================
+// 3. DELETAR DOCUMENTO (Atualizado para R2)
+// ======================================================
 router.delete(
   "/documentos/:id",
   verificarToken,
@@ -163,22 +166,34 @@ router.delete(
   async (req: AuthRequest, res: Response) => {
     const { id } = req.params;
     try {
+      // 1. Verificação de segurança (Apenas Admin)
       if (!req.userId || !(await checkAdmin(req.userId))) {
         return res.status(403).json({ msg: "Acesso negado." });
       }
-      const documento = await DocumentRepository.findById(Number(id));
-      if (!documento) return res.status(404).json({ msg: "Documento não encontrado." });
 
+      // 2. Busca o documento para pegar a URL
+      const documento = await DocumentRepository.findById(Number(id));
+      
+      if (!documento) {
+        return res.status(404).json({ msg: "Documento não encontrado." });
+      }
+
+      // 3. Apaga do Cloudflare R2
       if (documento.url_arquivo) {
         try {
-          await del(documento.url_arquivo, { token: process.env.BLOB_READ_WRITE_TOKEN });
+          // A função deleteFromR2 já trata erros internamente, mas o await garante
+          // que tentamos apagar antes de remover do banco.
+          await deleteFromR2(documento.url_arquivo);
         } catch (error) {
-          console.error("Erro ao apagar do Blob:", error);
+          console.error("Erro ao apagar do Storage (arquivo órfão):", error);
         }
       }
 
+      // 4. Apaga do Banco de Dados
       await DocumentRepository.delete(Number(id));
+      
       return res.json({ msg: "Documento apagado com sucesso." });
+
     } catch (err) {
       console.error(err);
       return res.status(500).json({ msg: "Erro ao deletar documento." });

@@ -6,8 +6,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
-const prisma_1 = require("../lib/prisma"); // ✅ Importando o Prisma
-const blob_1 = require("@vercel/blob");
+const prisma_1 = require("../lib/prisma");
+// REMOVIDO: import { del } from "@vercel/blob";
+const storage_1 = require("../services/storage"); // ✅ NOVA IMPORTAÇÃO
 const auth_1 = require("../middlewares/auth");
 const emailService_1 = require("../services/emailService");
 const express_rate_limit_1 = __importDefault(require("express-rate-limit"));
@@ -64,7 +65,6 @@ router.post("/register", (0, validateResource_1.validate)(authSchemas_1.register
                 telefone,
                 tipo_usuario: "cliente",
             },
-            // Seleciona o que retornar para não mandar a senha de volta
             select: { id: true, nome: true, email: true, telefone: true },
         });
         return res.json({ msg: "Usuário criado com segurança!", user: novoUsuario });
@@ -131,7 +131,7 @@ router.get("/clientes", auth_1.verificarToken, async (req, res) => {
     }
 });
 // ======================================================
-// 4. DELETAR USUÁRIO
+// 4. DELETAR USUÁRIO (ATUALIZADO PARA R2) ✅
 // ======================================================
 router.delete("/users/:id", auth_1.verificarToken, async (req, res) => {
     const { id } = req.params;
@@ -143,28 +143,30 @@ router.delete("/users/:id", auth_1.verificarToken, async (req, res) => {
         if (id === String(solicitanteId)) {
             return res.status(400).json({ msg: "Você não pode deletar sua própria conta." });
         }
-        // 1. Busca arquivos do cliente para apagar do Blob (Vercel)
+        // 1. Busca arquivos do cliente para apagar do Cloudflare R2
+        // ATENÇÃO: Verifique se no seu banco o campo é 'userId' ou 'user_id'
+        // Mantive 'user_id' conforme seu código original.
         const arquivosDoCliente = await prisma_1.prisma.documents.findMany({
             where: { user_id: Number(id) },
             select: { url_arquivo: true },
         });
-        for (const doc of arquivosDoCliente) {
-            if (doc.url_arquivo) {
-                try {
-                    await (0, blob_1.del)(doc.url_arquivo, { token: process.env.BLOB_READ_WRITE_TOKEN });
-                }
-                catch (error) {
-                    console.error(`Erro ao apagar arquivo ${doc.url_arquivo}:`, error);
-                }
-            }
+        // 2. Apaga arquivos do R2 em paralelo (Muito mais rápido)
+        if (arquivosDoCliente.length > 0) {
+            console.log(`🗑️ Apagando ${arquivosDoCliente.length} arquivos do Storage...`);
+            const promises = arquivosDoCliente
+                .filter(doc => doc.url_arquivo) // Filtra se tiver url nula
+                .map(doc => (0, storage_1.deleteFromR2)(doc.url_arquivo)); // Chama a função nova
+            await Promise.all(promises);
         }
-        // 2. Apaga registros de documentos no banco
+        // 3. Apaga Notificações (Opcional, se não tiver Cascade no banco)
+        await prisma_1.prisma.notifications.deleteMany({
+            where: { user_id: Number(id) }
+        });
+        // 4. Apaga registros de documentos no banco
         await prisma_1.prisma.documents.deleteMany({
             where: { user_id: Number(id) },
         });
-        // 3. Apaga o usuário
-        // O Prisma lança erro se não achar, então usamos try/catch ou verificamos antes.
-        // O delete lança erro se o registro não existir.
+        // 5. Apaga o usuário
         try {
             const usuarioDeletado = await prisma_1.prisma.users.delete({
                 where: { id: Number(id) },
@@ -176,7 +178,6 @@ router.delete("/users/:id", auth_1.verificarToken, async (req, res) => {
         }
         catch (e) {
             if (e.code === "P2025") {
-                // Código Prisma para "Record not found"
                 return res.status(404).json({ msg: "Usuário não encontrado." });
             }
             throw e;
@@ -216,7 +217,6 @@ router.put("/users/:id", auth_1.verificarToken, async (req, res) => {
     }
     catch (err) {
         console.error(err);
-        // P2002 é o código do Prisma para violação de Unique Constraint (Email ou CPF já existe)
         if (err.code === "P2002") {
             return res
                 .status(400)
