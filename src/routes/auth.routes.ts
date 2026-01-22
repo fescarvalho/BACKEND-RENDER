@@ -2,10 +2,10 @@ import { Router, Request, Response } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { prisma } from "../lib/prisma";
-// REMOVIDO: import { del } from "@vercel/blob";
-import { deleteFromR2 } from "../services/storage"; // ✅ NOVA IMPORTAÇÃO
+import { deleteFromR2 } from "../services/storage"; 
 import { verificarToken, AuthRequest } from "../middlewares/auth";
 import { enviarEmailRecuperacao } from "../services/emailService";
+import { createAuditLog } from "../services/audit.service"; // ✅ NOVA IMPORTAÇÃO
 import rateLimit from "express-rate-limit";
 
 // --- IMPORTAÇÕES DO ZOD ---
@@ -47,7 +47,6 @@ router.post(
     const { nome, email, senha, cpf, telefone } = req.body;
 
     try {
-      // Verifica duplicidade (Email ou CPF)
       const usuarioExistente = await prisma.users.findFirst({
         where: {
           OR: [{ email: email }, { cpf: cpf }],
@@ -56,16 +55,13 @@ router.post(
 
       if (usuarioExistente) {
         if (usuarioExistente.email === email) {
-          return res
-            .status(400)
-            .json({ msg: "Este e-mail já está em uso por outra conta." });
+          return res.status(400).json({ msg: "Este e-mail já está em uso." });
         }
         if (usuarioExistente.cpf === cpf) {
-          return res.status(400).json({ msg: "Este CPF já está cadastrado no sistema." });
+          return res.status(400).json({ msg: "Este CPF já está cadastrado." });
         }
       }
 
-      // Cria Hash e Salva
       const salt = await bcrypt.genSalt(10);
       const senhaHash = await bcrypt.hash(senha, salt);
 
@@ -78,10 +74,13 @@ router.post(
           telefone,
           tipo_usuario: "cliente",
         },
-        select: { id: true, nome: true, email: true, telefone: true },
+        select: { id: true, nome: true, email: true },
       });
 
-      return res.json({ msg: "Usuário criado com segurança!", user: novoUsuario });
+      // ✅ AUDITORIA: Registro de novo usuário
+      await createAuditLog(novoUsuario.id, "REGISTRO", "Usuário realizou o autocadastro no sistema");
+
+      return res.json({ msg: "Usuário criado com sucesso!", user: novoUsuario });
     } catch (err) {
       console.error(err);
       return res.status(500).json({ msg: "Erro ao cadastrar" });
@@ -104,19 +103,15 @@ router.post(
         where: { email: email },
       });
 
-      if (!user) {
+      if (!user || !(await bcrypt.compare(senha, user.senha_hash))) {
         return res.status(400).json({ msg: "E-mail ou senha incorretos." });
       }
 
-      const senhaBate = await bcrypt.compare(senha, user.senha_hash);
-
-      if (!senhaBate) {
-        return res.status(400).json({ msg: "E-mail ou senha incorretos." });
-      }
-
-      // Gera Token
       const secret = process.env.JWT_SECRET || "segredo_padrao_teste";
       const token = jwt.sign({ id: user.id }, secret, { expiresIn: "1h" });
+
+      // ✅ AUDITORIA: Login realizado
+      await createAuditLog(user.id, "LOGIN", "Usuário realizou login com sucesso");
 
       return res.json({
         msg: "Logado com sucesso!",
@@ -125,7 +120,6 @@ router.post(
           id: user.id,
           nome: user.nome,
           email: user.email,
-          cpf: user.cpf,
           tipo_usuario: user.tipo_usuario,
         },
       });
@@ -159,7 +153,7 @@ router.get("/clientes", verificarToken, async (req: AuthRequest, res: Response) 
 });
 
 // ======================================================
-// 4. DELETAR USUÁRIO (ATUALIZADO PARA R2) ✅
+// 4. DELETAR USUÁRIO (R2 + AUDITORIA) ✅
 // ======================================================
 router.delete("/users/:id", verificarToken, async (req: AuthRequest, res: Response) => {
   const { id } = req.params;
@@ -167,57 +161,47 @@ router.delete("/users/:id", verificarToken, async (req: AuthRequest, res: Respon
 
   try {
     if (!solicitanteId || !(await checkAdmin(solicitanteId))) {
-      return res.status(403).json({ msg: "Acesso negado. Apenas administradores." });
+      return res.status(403).json({ msg: "Acesso negado." });
     }
 
     if (id === String(solicitanteId)) {
       return res.status(400).json({ msg: "Você não pode deletar sua própria conta." });
     }
 
-    // 1. Busca arquivos do cliente para apagar do Cloudflare R2
-    // ATENÇÃO: Verifique se no seu banco o campo é 'userId' ou 'user_id'
-    // Mantive 'user_id' conforme seu código original.
+    // 1. Busca arquivos para apagar do R2
     const arquivosDoCliente = await prisma.documents.findMany({
       where: { user_id: Number(id) }, 
       select: { url_arquivo: true },
     });
 
-    // 2. Apaga arquivos do R2 em paralelo (Muito mais rápido)
+    // 2. Apaga arquivos do R2
     if (arquivosDoCliente.length > 0) {
-      console.log(`🗑️ Apagando ${arquivosDoCliente.length} arquivos do Storage...`);
-      
-      const promises = arquivosDoCliente
-        .filter(doc => doc.url_arquivo) // Filtra se tiver url nula
-        .map(doc => deleteFromR2(doc.url_arquivo)); // Chama a função nova
-      
-      await Promise.all(promises);
+      await Promise.all(
+        arquivosDoCliente
+          .filter(doc => doc.url_arquivo)
+          .map(doc => deleteFromR2(doc.url_arquivo!))
+      );
     }
 
-    // 3. Apaga Notificações (Opcional, se não tiver Cascade no banco)
-    await prisma.notifications.deleteMany({
-        where: { user_id: Number(id) }
+    // 3. Limpeza de banco
+    await prisma.notifications.deleteMany({ where: { user_id: Number(id) } });
+    await prisma.documents.deleteMany({ where: { user_id: Number(id) } });
+    await prisma.auditLog.deleteMany({ where: { user_id: Number(id) } }); // Opcional: Manter ou apagar histórico
+
+    // 4. Apaga o usuário
+    const usuarioDeletado = await prisma.users.delete({
+      where: { id: Number(id) },
+      select: { nome: true },
     });
 
-    // 4. Apaga registros de documentos no banco
-    await prisma.documents.deleteMany({
-      where: { user_id: Number(id) },
-    });
+    // ✅ AUDITORIA: Registro da deleção feita pelo Admin
+    await createAuditLog(
+      solicitanteId, 
+      "DELETOU_USUARIO", 
+      `Admin deletou o usuário ${usuarioDeletado.nome} (ID: ${id}) e limpou todos os arquivos.`
+    );
 
-    // 5. Apaga o usuário
-    try {
-      const usuarioDeletado = await prisma.users.delete({
-        where: { id: Number(id) },
-        select: { nome: true },
-      });
-      return res.json({
-        msg: `Usuário ${usuarioDeletado.nome} e todos os seus arquivos foram removidos com sucesso.`,
-      });
-    } catch (e: any) {
-      if (e.code === "P2025") {
-        return res.status(404).json({ msg: "Usuário não encontrado." });
-      }
-      throw e;
-    }
+    return res.json({ msg: "Usuário e arquivos removidos com sucesso." });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ msg: "Erro ao deletar usuário." });
@@ -233,36 +217,24 @@ router.put("/users/:id", verificarToken, async (req: AuthRequest, res: Response)
 
   try {
     if (!req.userId || !(await checkAdmin(req.userId))) {
-      return res.status(403).json({ msg: "Acesso negado. Apenas administradores." });
+      return res.status(403).json({ msg: "Acesso negado." });
     }
 
     const updatedUser = await prisma.users.update({
       where: { id: Number(id) },
       data: { nome, email, cpf, telefone },
-      select: {
-        id: true,
-        nome: true,
-        email: true,
-        cpf: true,
-        telefone: true,
-        tipo_usuario: true,
-      },
     });
 
-    return res.json({
-      msg: "Dados atualizados com sucesso!",
-      user: updatedUser,
-    });
+    // ✅ AUDITORIA: Atualização de dados
+    await createAuditLog(
+      req.userId, 
+      "ATUALIZOU_USUARIO", 
+      `Admin atualizou dados do usuário ID ${id}`
+    );
+
+    return res.json({ msg: "Dados atualizados!", user: updatedUser });
   } catch (err: any) {
     console.error(err);
-    if (err.code === "P2002") {
-      return res
-        .status(400)
-        .json({ msg: "Erro: Email ou CPF já cadastrado em outra conta." });
-    }
-    if (err.code === "P2025") {
-      return res.status(404).json({ msg: "Usuário não encontrado." });
-    }
     return res.status(500).json({ msg: "Erro ao atualizar usuário." });
   }
 });
@@ -270,72 +242,49 @@ router.put("/users/:id", verificarToken, async (req: AuthRequest, res: Response)
 // ======================================================
 // 6. ESQUECI A SENHA
 // ======================================================
-router.post(
-  "/forgot-password",
-  validate(forgotPasswordSchema),
-  async (req: Request, res: Response) => {
-    const { email } = req.body;
+router.post("/forgot-password", validate(forgotPasswordSchema), async (req: Request, res: Response) => {
+  const { email } = req.body;
+  try {
+    const user = await prisma.users.findUnique({ where: { email } });
+    if (!user) return res.status(404).json({ msg: "E-mail não encontrado." });
 
-    try {
-      const user = await prisma.users.findUnique({
-        where: { email },
-      });
+    const token = jwt.sign({ email: user.email }, JWT_SECRET, { expiresIn: "1h" });
+    const link = `https://leandro-abreu-contabilidade.vercel.app/redefinir-senha?token=${token}`;
+    
+    await enviarEmailRecuperacao(email, link);
 
-      if (!user) {
-        return res.status(404).json({ msg: "E-mail não encontrado." });
-      }
+    // ✅ AUDITORIA: Solicitação de recuperação
+    await createAuditLog(user.id, "SOLICITOU_RECUPERACAO", "Usuário solicitou link de redefinição de senha");
 
-      const token = jwt.sign({ email: user.email }, JWT_SECRET, { expiresIn: "1h" });
-      const link = `https://leandro-abreu-contabilidade.vercel.app/redefinir-senha?token=${token}`;
-
-      console.log(`Enviando para ${email}...`);
-
-      const sucesso = await enviarEmailRecuperacao(email, link);
-
-      if (sucesso) {
-        return res.json({ msg: "Link de recuperação enviado para seu e-mail!" });
-      } else {
-        return res
-          .status(500)
-          .json({ msg: "Erro ao enviar e-mail. Tente novamente mais tarde." });
-      }
-    } catch (error) {
-      console.error(error);
-      return res.status(500).json({ msg: "Erro interno." });
-    }
-  },
-);
+    return res.json({ msg: "Link de recuperação enviado!" });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ msg: "Erro interno." });
+  }
+});
 
 // ======================================================
 // 7. RESETAR SENHA
 // ======================================================
-router.post(
-  "/reset-password",
-  validate(resetPasswordSchema),
-  async (req: Request, res: Response) => {
-    const { token, newPassword } = req.body;
+router.post("/reset-password", validate(resetPasswordSchema), async (req: Request, res: Response) => {
+  const { token, newPassword } = req.body;
+  try {
+    const decoded: any = jwt.verify(token, JWT_SECRET);
+    const salt = await bcrypt.genSalt(10);
+    const hash = await bcrypt.hash(newPassword, salt);
 
-    try {
-      // 1. Valida Token
-      const decoded: any = jwt.verify(token, JWT_SECRET);
-      const email = decoded.email;
+    const user = await prisma.users.update({
+      where: { email: decoded.email },
+      data: { senha_hash: hash },
+    });
 
-      // 2. Criptografa Nova Senha
-      const salt = await bcrypt.genSalt(10);
-      const hash = await bcrypt.hash(newPassword, salt);
+    // ✅ AUDITORIA: Senha alterada
+    await createAuditLog(user.id, "REDEFINIU_SENHA", "Usuário alterou a senha via link de recuperação");
 
-      // 3. Atualiza Banco
-      await prisma.users.update({
-        where: { email: email },
-        data: { senha_hash: hash },
-      });
-
-      return res.json({ msg: "Senha alterada com sucesso!" });
-    } catch (error) {
-      console.error("❌ ERRO NO RESET:", error);
-      return res.status(400).json({ msg: "O link expirou ou é inválido. Peça um novo." });
-    }
-  },
-);
+    return res.json({ msg: "Senha alterada com sucesso!" });
+  } catch (error) {
+    return res.status(400).json({ msg: "Link inválido ou expirado." });
+  }
+});
 
 export default router;

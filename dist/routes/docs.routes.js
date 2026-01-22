@@ -5,14 +5,13 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const multer_1 = __importDefault(require("multer"));
-// REMOVIDO: import { put, del } from "@vercel/blob"; 
-const storage_1 = require("../services/storage"); // ✅ NOVA IMPORTAÇÃO
+const storage_1 = require("../services/storage");
 const prisma_1 = require("../lib/prisma");
 const DocumentRepository_1 = require("../repositories/DocumentRepository");
 const emailService_1 = require("../services/emailService");
 const auth_1 = require("../middlewares/auth");
 const validateResource_1 = require("../middlewares/validateResource");
-const storage_2 = require("../services/storage"); // <--- Adicione isso
+const audit_service_1 = require("../services/audit.service"); // ✅ NOVA IMPORTAÇÃO
 const NotificationRepository_1 = require("../repositories/NotificationRepository");
 const server_1 = require("../server");
 const docSchemas_1 = require("../schemas/docSchemas");
@@ -47,7 +46,7 @@ router.get("/meus-documentos", auth_1.verificarToken, async (req, res) => {
     }
 });
 // ======================================================
-// 2. UPLOAD (POST) - AGORA COM R2 ✅
+// 2. UPLOAD (POST) - COM R2 E AUDITORIA ✅
 // ======================================================
 router.post("/upload", auth_1.verificarToken, upload.single("arquivo"), (0, validateResource_1.validate)(docSchemas_1.uploadSchema), async (req, res) => {
     try {
@@ -63,31 +62,25 @@ router.post("/upload", auth_1.verificarToken, upload.single("arquivo"), (0, vali
             select: { id: true, nome: true, email: true },
         });
         if (!dadosCliente) {
-            return res
-                .status(404)
-                .json({ msg: `Erro: O cliente com ID ${cliente_id} não existe.` });
+            return res.status(404).json({ msg: `O cliente com ID ${cliente_id} não existe.` });
         }
-        // ✅ ALTERADO: Upload para o Cloudflare R2
-        // Usamos o cliente_id como "OfficeId" temporário para organizar as pastas
         const urlArquivo = await (0, storage_1.uploadToR2)(file, String(cliente_id), String(cliente_id));
         const novoDoc = await DocumentRepository_1.DocumentRepository.create({
             userId: Number(cliente_id),
             titulo: titulo,
-            url: urlArquivo, // ✅ URL do R2
+            url: urlArquivo,
             nomeOriginal: file.originalname,
             tamanho: file.size,
             formato: file.mimetype,
             dataVencimento: vencimento ? new Date(vencimento) : undefined,
         });
-        // Envio de Email (Assíncrono)
+        // ✅ AUDITORIA: Registro de Upload
+        await (0, audit_service_1.createAuditLog)(req.userId, "UPLOAD_DOCUMENTO", `Admin enviou o documento "${titulo}" para o cliente ${dadosCliente.nome}`, novoDoc.id);
         if (dadosCliente.email) {
             (0, emailService_1.enviarEmailNovoDocumento)(dadosCliente.email, dadosCliente.nome, titulo).catch((err) => console.error("Erro assíncrono no envio de e-mail:", err));
         }
-        // ✅ LÓGICA DE NOTIFICAÇÃO (PERSISTÊNCIA + SOCKET)
         try {
-            // 1. Salvar no Banco
             const novaNotificacao = await NotificationRepository_1.NotificationRepository.create(Number(cliente_id), "Novo Documento Recebido", `O documento "${titulo}" foi adicionado.`, novoDoc.url_arquivo);
-            // 2. Disparar Socket em Tempo Real
             server_1.io.to(`user_${cliente_id}`).emit("nova_notificacao", {
                 id: novaNotificacao.id,
                 titulo: novaNotificacao.titulo,
@@ -95,10 +88,9 @@ router.post("/upload", auth_1.verificarToken, upload.single("arquivo"), (0, vali
                 lida: false,
                 criado_em: novaNotificacao.criado_em
             });
-            console.log(`🔔 Notificação enviada para user_${cliente_id}`);
         }
         catch (notifError) {
-            console.error("Erro ao processar notificação (não crítico):", notifError);
+            console.error("Erro ao processar notificação:", notifError);
         }
         return res.json({
             msg: `Arquivo enviado para ${dadosCliente.nome} com sucesso!`,
@@ -111,36 +103,24 @@ router.post("/upload", auth_1.verificarToken, upload.single("arquivo"), (0, vali
     }
 });
 // ======================================================
-// 3. DELETAR DOCUMENTO
-// ======================================================
-// ======================================================
-// 3. DELETAR DOCUMENTO (Atualizado para R2)
+// 3. DELETAR DOCUMENTO (R2 + AUDITORIA) ✅
 // ======================================================
 router.delete("/documentos/:id", auth_1.verificarToken, (0, validateResource_1.validate)(docSchemas_1.deleteDocumentSchema), async (req, res) => {
     const { id } = req.params;
     try {
-        // 1. Verificação de segurança (Apenas Admin)
         if (!req.userId || !(await checkAdmin(req.userId))) {
             return res.status(403).json({ msg: "Acesso negado." });
         }
-        // 2. Busca o documento para pegar a URL
         const documento = await DocumentRepository_1.DocumentRepository.findById(Number(id));
         if (!documento) {
             return res.status(404).json({ msg: "Documento não encontrado." });
         }
-        // 3. Apaga do Cloudflare R2
         if (documento.url_arquivo) {
-            try {
-                // A função deleteFromR2 já trata erros internamente, mas o await garante
-                // que tentamos apagar antes de remover do banco.
-                await (0, storage_2.deleteFromR2)(documento.url_arquivo);
-            }
-            catch (error) {
-                console.error("Erro ao apagar do Storage (arquivo órfão):", error);
-            }
+            await (0, storage_1.deleteFromR2)(documento.url_arquivo);
         }
-        // 4. Apaga do Banco de Dados
         await DocumentRepository_1.DocumentRepository.delete(Number(id));
+        // ✅ AUDITORIA: Registro de Exclusão
+        await (0, audit_service_1.createAuditLog)(req.userId, "DELETOU_DOCUMENTO", `Admin removeu o documento "${documento.titulo}" (ID: ${id})`);
         return res.json({ msg: "Documento apagado com sucesso." });
     }
     catch (err) {
@@ -238,7 +218,7 @@ router.get("/clientes/:id/documentos", auth_1.verificarToken, (0, validateResour
     }
 });
 // ======================================================
-// 6. CONFIRMAÇÃO DE LEITURA
+// 6. CONFIRMAÇÃO DE LEITURA (AUDITORIA) ✅
 // ======================================================
 router.patch("/documents/:id/visualizar", auth_1.verificarToken, async (req, res) => {
     const { id } = req.params;
@@ -246,6 +226,8 @@ router.patch("/documents/:id/visualizar", auth_1.verificarToken, async (req, res
         if (!req.userId)
             return res.status(401).json({ msg: "Erro auth" });
         await DocumentRepository_1.DocumentRepository.markAsViewed(Number(id), req.userId);
+        // ✅ AUDITORIA: Registro de Visualização
+        await (0, audit_service_1.createAuditLog)(req.userId, "VISUALIZOU_DOCUMENTO", `Usuário visualizou o documento ID ${id}`, Number(id));
         return res.json({ ok: true });
     }
     catch (err) {
@@ -304,11 +286,9 @@ router.get("/dashboard/resumo", auth_1.verificarToken, async (req, res) => {
 // ======================================================
 // 8. ROTAS DE NOTIFICAÇÕES (NOVAS) ✅
 // ======================================================
-// Listar notificações do usuário
 router.get('/notifications/:userId', auth_1.verificarToken, async (req, res) => {
     try {
         const { userId } = req.params;
-        // Segurança: Usuário só pode ver suas próprias notificações (a menos que seja admin)
         if (Number(userId) !== req.userId && !(await checkAdmin(req.userId))) {
             return res.status(403).json({ msg: "Acesso negado" });
         }
@@ -320,7 +300,6 @@ router.get('/notifications/:userId', auth_1.verificarToken, async (req, res) => 
         return res.status(500).json({ msg: "Erro ao buscar notificações" });
     }
 });
-// Marcar como lida
 router.patch('/notifications/:id/read', auth_1.verificarToken, async (req, res) => {
     try {
         const { id } = req.params;
@@ -331,7 +310,6 @@ router.patch('/notifications/:id/read', auth_1.verificarToken, async (req, res) 
         return res.status(500).json({ msg: "Erro ao atualizar notificação" });
     }
 });
-// Marcar todas como lidas
 router.patch('/notifications/read-all', auth_1.verificarToken, async (req, res) => {
     try {
         const { userId } = req.body;
@@ -343,6 +321,69 @@ router.patch('/notifications/read-all', auth_1.verificarToken, async (req, res) 
     }
     catch (error) {
         return res.status(500).json({ msg: "Erro ao limpar notificações" });
+    }
+});
+// 10. LISTAR LOGS DE AUDITORIA (Admin Only) - COM FILTROS
+// ======================================================
+router.get("/audit-logs", auth_1.verificarToken, async (req, res) => {
+    try {
+        // 1. Segurança: Apenas Admin pode ver logs
+        if (!req.userId || !(await checkAdmin(req.userId))) {
+            return res.status(403).json({ msg: "Acesso negado." });
+        }
+        // 2. Captura paginação e filtros da URL
+        const { userName, startDate, endDate } = req.query;
+        const page = Number(req.query.page) || 1;
+        const limit = Number(req.query.limit) || 20;
+        // 3. Constrói o objeto de filtro "where" dinamicamente
+        let where = {};
+        // Filtro: Nome do Usuário (insensível a maiúsculas/minúsculas)
+        if (userName) {
+            where.user = {
+                nome: { contains: String(userName), mode: 'insensitive' }
+            };
+        }
+        // Filtro: Intervalo de Datas
+        if (startDate || endDate) {
+            where.criado_em = {};
+            if (startDate) {
+                // >= Data Inicial
+                where.criado_em.gte = new Date(String(startDate));
+            }
+            if (endDate) {
+                // <= Data Final (ajustada para o último milissegundo do dia)
+                const finalDate = new Date(String(endDate));
+                finalDate.setHours(23, 59, 59, 999);
+                where.criado_em.lte = finalDate;
+            }
+        }
+        // 4. Executa a busca (Logs + Contagem Total)
+        const [logs, total] = await Promise.all([
+            prisma_1.prisma.auditLog.findMany({
+                where, // ✅ Aplica os filtros aqui
+                take: limit,
+                skip: (page - 1) * limit,
+                orderBy: { criado_em: "desc" },
+                include: {
+                    user: {
+                        select: { nome: true, email: true }
+                    }
+                }
+            }),
+            prisma_1.prisma.auditLog.count({ where }) // ✅ Conta apenas os logs filtrados
+        ]);
+        return res.json({
+            data: serializeBigInt(logs),
+            meta: {
+                total,
+                page,
+                lastPage: Math.ceil(total / limit)
+            }
+        });
+    }
+    catch (err) {
+        console.error(err);
+        return res.status(500).json({ msg: "Erro ao carregar logs de auditoria." });
     }
 });
 exports.default = router;

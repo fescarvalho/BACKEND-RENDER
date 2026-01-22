@@ -1,13 +1,12 @@
 import { Router, Response } from "express";
 import multer from "multer";
-// REMOVIDO: import { put, del } from "@vercel/blob"; 
-import { uploadToR2 } from "../services/storage"; // ✅ NOVA IMPORTAÇÃO
+import { uploadToR2, deleteFromR2 } from "../services/storage"; 
 import { prisma } from "../lib/prisma";
 import { DocumentRepository } from "../repositories/DocumentRepository";
 import { enviarEmailNovoDocumento } from "../services/emailService";
 import { verificarToken, AuthRequest } from "../middlewares/auth";
 import { validate } from "../middlewares/validateResource";
-import { deleteFromR2 } from "../services/storage"; // <--- Adicione isso
+import { createAuditLog } from "../services/audit.service"; // ✅ NOVA IMPORTAÇÃO
 
 import { NotificationRepository } from '../repositories/NotificationRepository';
 import { io } from '../server'; 
@@ -67,7 +66,7 @@ router.get(
 );
 
 // ======================================================
-// 2. UPLOAD (POST) - AGORA COM R2 ✅
+// 2. UPLOAD (POST) - COM R2 E AUDITORIA ✅
 // ======================================================
 router.post(
   "/upload",
@@ -92,35 +91,36 @@ router.post(
       });
 
       if (!dadosCliente) {
-        return res
-          .status(404)
-          .json({ msg: `Erro: O cliente com ID ${cliente_id} não existe.` });
+        return res.status(404).json({ msg: `O cliente com ID ${cliente_id} não existe.` });
       }
 
-      // ✅ ALTERADO: Upload para o Cloudflare R2
-      // Usamos o cliente_id como "OfficeId" temporário para organizar as pastas
       const urlArquivo = await uploadToR2(file, String(cliente_id), String(cliente_id));
 
       const novoDoc = await DocumentRepository.create({
         userId: Number(cliente_id),
         titulo: titulo,
-        url: urlArquivo, // ✅ URL do R2
+        url: urlArquivo,
         nomeOriginal: file.originalname,
         tamanho: file.size,
         formato: file.mimetype,
         dataVencimento: vencimento ? new Date(vencimento) : undefined,
       });
 
-      // Envio de Email (Assíncrono)
+      // ✅ AUDITORIA: Registro de Upload
+      await createAuditLog(
+        req.userId, 
+        "UPLOAD_DOCUMENTO", 
+        `Admin enviou o documento "${titulo}" para o cliente ${dadosCliente.nome}`,
+        novoDoc.id
+      );
+
       if (dadosCliente.email) {
         enviarEmailNovoDocumento(dadosCliente.email, dadosCliente.nome, titulo).catch(
           (err) => console.error("Erro assíncrono no envio de e-mail:", err),
         );
       }
 
-      // ✅ LÓGICA DE NOTIFICAÇÃO (PERSISTÊNCIA + SOCKET)
       try {
-        // 1. Salvar no Banco
         const novaNotificacao = await NotificationRepository.create(
           Number(cliente_id),
           "Novo Documento Recebido",
@@ -128,7 +128,6 @@ router.post(
           novoDoc.url_arquivo 
         );
 
-        // 2. Disparar Socket em Tempo Real
         io.to(`user_${cliente_id}`).emit("nova_notificacao", {
           id: novaNotificacao.id,
           titulo: novaNotificacao.titulo,
@@ -136,10 +135,8 @@ router.post(
           lida: false,
           criado_em: novaNotificacao.criado_em
         });
-        
-        console.log(`🔔 Notificação enviada para user_${cliente_id}`);
       } catch (notifError) {
-        console.error("Erro ao processar notificação (não crítico):", notifError);
+        console.error("Erro ao processar notificação:", notifError);
       }
 
       return res.json({
@@ -154,10 +151,7 @@ router.post(
 );
 
 // ======================================================
-// 3. DELETAR DOCUMENTO
-// ======================================================
-// ======================================================
-// 3. DELETAR DOCUMENTO (Atualizado para R2)
+// 3. DELETAR DOCUMENTO (R2 + AUDITORIA) ✅
 // ======================================================
 router.delete(
   "/documentos/:id",
@@ -166,31 +160,28 @@ router.delete(
   async (req: AuthRequest, res: Response) => {
     const { id } = req.params;
     try {
-      // 1. Verificação de segurança (Apenas Admin)
       if (!req.userId || !(await checkAdmin(req.userId))) {
         return res.status(403).json({ msg: "Acesso negado." });
       }
 
-      // 2. Busca o documento para pegar a URL
       const documento = await DocumentRepository.findById(Number(id));
       
       if (!documento) {
         return res.status(404).json({ msg: "Documento não encontrado." });
       }
 
-      // 3. Apaga do Cloudflare R2
       if (documento.url_arquivo) {
-        try {
-          // A função deleteFromR2 já trata erros internamente, mas o await garante
-          // que tentamos apagar antes de remover do banco.
-          await deleteFromR2(documento.url_arquivo);
-        } catch (error) {
-          console.error("Erro ao apagar do Storage (arquivo órfão):", error);
-        }
+        await deleteFromR2(documento.url_arquivo);
       }
 
-      // 4. Apaga do Banco de Dados
       await DocumentRepository.delete(Number(id));
+      
+      // ✅ AUDITORIA: Registro de Exclusão
+      await createAuditLog(
+        req.userId, 
+        "DELETOU_DOCUMENTO", 
+        `Admin removeu o documento "${documento.titulo}" (ID: ${id})`
+      );
       
       return res.json({ msg: "Documento apagado com sucesso." });
 
@@ -306,7 +297,7 @@ router.get(
 );
 
 // ======================================================
-// 6. CONFIRMAÇÃO DE LEITURA
+// 6. CONFIRMAÇÃO DE LEITURA (AUDITORIA) ✅
 // ======================================================
 router.patch(
   "/documents/:id/visualizar",
@@ -316,6 +307,15 @@ router.patch(
     try {
       if (!req.userId) return res.status(401).json({ msg: "Erro auth" });
       await DocumentRepository.markAsViewed(Number(id), req.userId);
+
+      // ✅ AUDITORIA: Registro de Visualização
+      await createAuditLog(
+        req.userId, 
+        "VISUALIZOU_DOCUMENTO", 
+        `Usuário visualizou o documento ID ${id}`, 
+        Number(id)
+      );
+
       return res.json({ ok: true });
     } catch (err) {
       console.error("Erro ao marcar visualização:", err);
@@ -386,19 +386,15 @@ router.get(
 // 8. ROTAS DE NOTIFICAÇÕES (NOVAS) ✅
 // ======================================================
 
-// Listar notificações do usuário
 router.get(
   '/notifications/:userId',
   verificarToken,
   async (req: AuthRequest, res: Response) => {
     try {
       const { userId } = req.params;
-      
-      // Segurança: Usuário só pode ver suas próprias notificações (a menos que seja admin)
       if (Number(userId) !== req.userId && !(await checkAdmin(req.userId!))) {
           return res.status(403).json({ msg: "Acesso negado" });
       }
-
       const notificacoes = await NotificationRepository.findByUser(Number(userId));
       return res.json(notificacoes);
     } catch (error) {
@@ -407,7 +403,6 @@ router.get(
     }
 });
 
-// Marcar como lida
 router.patch(
   '/notifications/:id/read',
   verificarToken,
@@ -421,18 +416,15 @@ router.patch(
     }
 });
 
-// Marcar todas como lidas
 router.patch(
   '/notifications/read-all',
   verificarToken,
   async (req: AuthRequest, res: Response) => {
     try {
       const { userId } = req.body;
-      
       if (Number(userId) !== req.userId) {
          return res.status(403).json({ msg: "Acesso negado" });
       }
-
       await NotificationRepository.markAllRead(Number(userId));
       return res.json({ msg: "Todas marcadas como lidas" });
     } catch (error) {
@@ -440,4 +432,76 @@ router.patch(
     }
 });
 
+
+
+// 10. LISTAR LOGS DE AUDITORIA (Admin Only) - COM FILTROS
+// ======================================================
+router.get("/audit-logs", verificarToken, async (req: AuthRequest, res: Response) => {
+  try {
+      // 1. Segurança: Apenas Admin pode ver logs
+      if (!req.userId || !(await checkAdmin(req.userId))) {
+          return res.status(403).json({ msg: "Acesso negado." });
+      }
+
+      // 2. Captura paginação e filtros da URL
+      const { userName, startDate, endDate } = req.query;
+      const page = Number(req.query.page) || 1;
+      const limit = Number(req.query.limit) || 20;
+
+      // 3. Constrói o objeto de filtro "where" dinamicamente
+      let where: any = {};
+
+      // Filtro: Nome do Usuário (insensível a maiúsculas/minúsculas)
+      if (userName) {
+          where.user = { 
+              nome: { contains: String(userName), mode: 'insensitive' } 
+          };
+      }
+
+      // Filtro: Intervalo de Datas
+      if (startDate || endDate) {
+          where.criado_em = {};
+          
+          if (startDate) {
+              // >= Data Inicial
+              where.criado_em.gte = new Date(String(startDate));
+          }
+          
+          if (endDate) {
+              // <= Data Final (ajustada para o último milissegundo do dia)
+              const finalDate = new Date(String(endDate));
+              finalDate.setHours(23, 59, 59, 999); 
+              where.criado_em.lte = finalDate;
+          }
+      }
+
+      // 4. Executa a busca (Logs + Contagem Total)
+      const [logs, total] = await Promise.all([
+          prisma.auditLog.findMany({
+              where, // ✅ Aplica os filtros aqui
+              take: limit,
+              skip: (page - 1) * limit,
+              orderBy: { criado_em: "desc" },
+              include: { 
+                  user: { 
+                      select: { nome: true, email: true } 
+                  } 
+              }
+          }),
+          prisma.auditLog.count({ where }) // ✅ Conta apenas os logs filtrados
+      ]);
+
+      return res.json({
+          data: serializeBigInt(logs),
+          meta: {
+              total,
+              page,
+              lastPage: Math.ceil(total / limit)
+          }
+      });
+  } catch (err) {
+      console.error(err);
+      return res.status(500).json({ msg: "Erro ao carregar logs de auditoria." });
+  }
+});
 export default router;

@@ -49,5 +49,23 @@ model users {
   telefone      String?         @db.VarChar(20)
   
   documents     documents[]
-  notifications notifications[] // ✅ NOVO: Relacionamento com notificações
+  notifications notifications[]
+  
+  // ✅ ADICIONADO: Relação inversa para o AuditLog funcionar
+  audit_logs    AuditLog[]      
+}
+
+model AuditLog {
+  id          Int      @id @default(autoincrement())
+  // 🔄 AJUSTADO: usei user_id (com underline) para seguir seu padrão
+  user_id     Int      
+  acao        String   
+  detalhes    String?  @db.Text
+  document_id Int?     
+  criado_em   DateTime @default(now())
+
+  // Relacionamento corrigido apontando para 'users' (minúsculo)
+  user        users    @relation(fields: [user_id], references: [id])
+
+  @@index([user_id])
 }
