@@ -11,7 +11,6 @@ model documents {
   id              Int       @id @default(autoincrement())
   user_id         Int?
   
-  // ✅ ALTERADO: @db.Text para evitar erro de texto longo
   titulo          String    @db.Text 
   url_arquivo     String    @db.Text
   nome_original   String?   @db.Text
@@ -22,7 +21,9 @@ model documents {
   visualizado_em  DateTime? @db.Timestamp(6)
   data_vencimento DateTime?
   
-  users           users?    @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  // 🔴 ONDE ESTAVA: onDelete: NoAction
+  // ✅ MUDE PARA:   onDelete: Cascade
+  users           users?    @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 }
 
 model notifications {
@@ -57,15 +58,14 @@ model users {
 
 model AuditLog {
   id          Int      @id @default(autoincrement())
-  // 🔄 AJUSTADO: usei user_id (com underline) para seguir seu padrão
   user_id     Int      
   acao        String   
   detalhes    String?  @db.Text
   document_id Int?     
   criado_em   DateTime @default(now())
 
-  // Relacionamento corrigido apontando para 'users' (minúsculo)
-  user        users    @relation(fields: [user_id], references: [id])
 
+  user        users    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  
   @@index([user_id])
 }

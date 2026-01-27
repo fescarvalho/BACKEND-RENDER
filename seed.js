@@ -1,4 +1,4 @@
-// seed.js
+
 const db = require("./src/db");
 const bcrypt = require("bcryptjs");
 
@@ -7,14 +7,14 @@ async function criarClienteTeste() {
 
   const nome = "Padaria do João";
   const email = "joao@padaria.com";
-  const senhaAberta = "123456"; // Senha que o João vai usar
+  const senhaAberta = "123456"; 
 
-  // 1. Criptografar a senha
+  
   const salt = await bcrypt.genSalt(10);
   const senhaHash = await bcrypt.hash(senhaAberta, salt);
 
   try {
-    // 2. Inserir no banco
+    
     await db.query(`INSERT INTO users (nome, email, senha_hash) VALUES ($1, $2, $3)`, [
       nome,
       email,
@@ -31,7 +31,7 @@ async function criarClienteTeste() {
     }
   }
 
-  // Encerra o script (senão ele fica rodando pra sempre)
+  
   process.exit();
 }
 

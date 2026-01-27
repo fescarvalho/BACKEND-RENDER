@@ -12,7 +12,7 @@ async function main() {
       nome: "Super Admin",
       email: "supervisor@admin.com",
       senha_hash: senhaForte,
-      tipo_usuario: "admin", // O segredo está aqui
+      tipo_usuario: "admin", 
       cpf: "00000000000",
       telefone: "000000000"
     },

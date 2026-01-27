@@ -1,7 +1,7 @@
 version: "3.8"
 
 services:
-  # Serviço do Banco de Dados
+
   db:
     image: postgres:15-alpine
     container_name: postgres_contabilidade
@@ -13,10 +13,10 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      # Isso garante que os dados não sumam quando você desligar o PC
+ 
       - ./pgdata:/var/lib/postgresql/data
 
-  # (Opcional) Interface Gráfica para ver o banco no navegador
+  
   pgadmin:
     image: dpage/pgadmin4
     container_name: pgadmin_contabilidade
