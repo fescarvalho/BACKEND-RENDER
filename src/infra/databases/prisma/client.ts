@@ -1,16 +1,14 @@
 import { PrismaClient } from "@prisma/client";
 
-// Evita erros de tipagem com o objeto global
-declare global {
-  var prisma: PrismaClient | undefined;
-}
+// Evita múltiplas instâncias no hot-reload em desenvolvimento
+// E garante instância única em produção
 
-// Se já existir uma conexão global, usa ela. Se não, cria uma nova.
-export const prisma = global.prisma || new PrismaClient({
-  log: ['query', 'error'], // Opcional: Ajuda a ver os erros no console
-});
+const globalForPrisma = global as unknown as { prisma: PrismaClient };
 
-// Em desenvolvimento, salva a conexão na variável global para reuso
-if (process.env.NODE_ENV !== "production") {
-  global.prisma = prisma;
-}
+export const prisma =
+  globalForPrisma.prisma ||
+  new PrismaClient({
+    log: ["query", "error"], // Ajuda a ver os logs que você me mandou
+  });
+
+if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;

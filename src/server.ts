@@ -3,23 +3,35 @@ dotenv.config();
 
 import express from 'express';
 import cors from 'cors';
-import authRoutes from './routes/auth.routes';
-import docsRoutes from './routes/docs.routes';
+
+import authRoutes from './infra/http/routes/auth.routes'; 
+import docsRoutes from './infra/http/routes/docs.routes';
+import adminRoutes from './infra/http/routes/admin.routes';
+
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
-// 1. Importações necessárias para o Socket
+
 import { createServer } from 'http';
 import { Server } from 'socket.io';
+
 
 (BigInt.prototype as any).toJSON = function () {
   return Number(this);
 };
 
 const app = express();
-// 2. Criamos o servidor HTTP "cru" passando o Express para ele
 const httpServer = createServer(app);
 
 app.use(helmet());
+
+
+const allowedOrigins = [
+  'https://leandro-abreu-contabilidade.vercel.app',
+  'https://backend-render-m0x6.onrender.com',       
+  'http://localhost:8080', 
+  'http://localhost:5173',
+  'http://localhost:3000'
+];
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -29,21 +41,14 @@ const limiter = rateLimit({
   message: "Muitas tentativas de acesso vindas deste IP, tente novamente em 15 minutos."
 });
 
-// 3. Lista de origens permitidas (Centralizada para usar no Express e no Socket)
-const allowedOrigins = [
-  'https://leandro-abreu-contabilidade.vercel.app',
-  'http://localhost:8080', // Seu teste local
-  'http://localhost:5173'  // Adicionei o padrão do Vite/React
-];
 
-// 4. Configuração do Socket.io
 const io = new Server(httpServer, {
   cors: {
-    // No Render, você precisa liberar explicitamente o seu Frontend da Vercel
-    origin: "*",
-    methods: ["GET", "POST"]
+    origin: '*', 
+    methods: ["GET", "POST"],
+    credentials: true
   },
-  transports: ['websocket', 'polling']
+  transports: ['websocket', 'polling'] 
 });
 
 io.on("connection", (socket) => {
@@ -55,15 +60,11 @@ io.on("connection", (socket) => {
   });
 });
 
-
-
-// 6. EXPORTE O IO para poder usar nos controllers/rotas
 export { io };
 
 app.set('trust proxy', 1);
 app.use(limiter);
 
-// Configuração de CORS do Express
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
@@ -74,16 +75,24 @@ app.use(cors({
     return callback(null, true);
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
 }));
 
 app.use(express.json());
-app.use(authRoutes);
-app.use(docsRoutes);
+
+
+console.log("Carregando rotas da INFRA...");
+app.use("/auth", authRoutes);
+app.use("/api", docsRoutes);
+app.use("/admin", adminRoutes);
+
+app.get("/", (req, res) => {
+  res.json({ status: "Online", msg: "API Rodando 🚀" });
+});
 
 const PORT = process.env.PORT || 3000;
 
-// 7. IMPORTANTE: Trocamos app.listen por httpServer.listen
 httpServer.listen(PORT, () => {
   console.log(`🚀 SERVIDOR RODANDO NA PORTA ${PORT}`);
 });

@@ -4,7 +4,7 @@ import { makeRegisterController } from "../../../main/factories/makeRegisterCont
 import { validate } from "../middlewares/validateResource";
 import { loginSchema, registerSchema } from "../schemas/authSchemas"; // Certifique-se que o registerSchema está aqui
 import { makePasswordRecoveryController } from "../../../main/factories/makePasswordRecoveryController";
-
+import { GetNotificationsController } from "../controllers/GetNotificationsController";
 
 
 const router = Router();
@@ -13,7 +13,7 @@ const router = Router();
 const loginController = makeLoginController();
 const registerController = makeRegisterController(); // Instância com o RegisterUseCase
 const recoveryController = makePasswordRecoveryController();
-
+const getNotifications = new GetNotificationsController();
 
 const verifyAdmin = (req: any, res: any, next: any) => {
   if (req.tipo_usuario !== "admin") {
@@ -38,5 +38,5 @@ router.post(
 
 router.post("/forgot-password", (req, res) => recoveryController.forgot(req, res));
 router.post("/reset-password", (req, res) => recoveryController.reset(req, res));
-
+router.get("/notifications/:userId", (req, res) => getNotifications.handle(req, res));
 export default router;

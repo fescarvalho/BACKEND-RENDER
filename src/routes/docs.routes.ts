@@ -1,15 +1,16 @@
 import { Router, Response } from "express";
 import multer from "multer";
-import { uploadToR2, deleteFromR2 } from "../services/storage"; 
+import { uploadToR2, deleteFromR2 } from "../services/storage";
 import { prisma } from "../lib/prisma";
 import { DocumentRepository } from "../repositories/DocumentRepository";
 import { enviarEmailNovoDocumento } from "../services/emailService";
 import { verificarToken, AuthRequest } from "../middlewares/auth";
 import { validate } from "../middlewares/validateResource";
-import { createAuditLog } from "../services/audit.service"; // ✅ NOVA IMPORTAÇÃO
-
+import { createAuditLog } from "../services/audit.service";
+// ✅ Import Controller
+import { GetNotificationsController } from "../infra/http/controllers/GetNotificationsController"; 
 import { NotificationRepository } from '../repositories/NotificationRepository';
-import { io } from '../server'; 
+import { io } from '../server'; // Ensure this path is correct based on your folder structure
 
 import {
   uploadSchema,
@@ -20,6 +21,8 @@ import {
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
+// ✅ Instantiate Controller
+const getNotificationsController = new GetNotificationsController();
 
 const serializeBigInt = (data: any) => {
   return JSON.parse(
@@ -383,26 +386,18 @@ router.get(
 );
 
 // ======================================================
-// 8. ROTAS DE NOTIFICAÇÕES (NOVAS) ✅
+// 8. ROTAS DE NOTIFICAÇÕES (AGORA COM CONTROLLER) ✅
 // ======================================================
 
+// ✅ Rota 1: Buscar Notificações
+// (Como este arquivo responde por /api, o endpoint final será /api/notifications/:userId)
 router.get(
   '/notifications/:userId',
   verificarToken,
-  async (req: AuthRequest, res: Response) => {
-    try {
-      const { userId } = req.params;
-      if (Number(userId) !== req.userId && !(await checkAdmin(req.userId!))) {
-          return res.status(403).json({ msg: "Acesso negado" });
-      }
-      const notificacoes = await NotificationRepository.findByUser(Number(userId));
-      return res.json(notificacoes);
-    } catch (error) {
-      console.error(error);
-      return res.status(500).json({ msg: "Erro ao buscar notificações" });
-    }
-});
+  (req, res) => getNotificationsController.handle(req, res)
+);
 
+// ✅ Rota 2: Marcar uma como lida
 router.patch(
   '/notifications/:id/read',
   verificarToken,
@@ -414,8 +409,9 @@ router.patch(
     } catch (error) {
       return res.status(500).json({ msg: "Erro ao atualizar notificação" });
     }
-});
+  });
 
+// ✅ Rota 3: Marcar todas como lidas
 router.patch(
   '/notifications/read-all',
   verificarToken,
@@ -430,10 +426,10 @@ router.patch(
     } catch (error) {
       return res.status(500).json({ msg: "Erro ao limpar notificações" });
     }
-});
+  });
 
 
-
+// ======================================================
 // 10. LISTAR LOGS DE AUDITORIA (Admin Only) - COM FILTROS
 // ======================================================
 router.get("/audit-logs", verificarToken, async (req: AuthRequest, res: Response) => {
@@ -504,4 +500,5 @@ router.get("/audit-logs", verificarToken, async (req: AuthRequest, res: Response
       return res.status(500).json({ msg: "Erro ao carregar logs de auditoria." });
   }
 });
+
 export default router;
