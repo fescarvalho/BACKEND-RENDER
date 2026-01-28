@@ -40,12 +40,10 @@ const allowedOrigins = [
 const io = new Server(httpServer, {
   cors: {
     // No Render, você precisa liberar explicitamente o seu Frontend da Vercel
-    origin: [
-      "https://leandro-abreu-contabilidade.vercel.app", // Seu Front na Vercel
-      "http://localhost:5173" // Seu teste local
-    ],
+    origin: "*",
     methods: ["GET", "POST"]
-  }
+  },
+  transports: ['websocket', 'polling']
 });
 
 io.on("connection", (socket) => {

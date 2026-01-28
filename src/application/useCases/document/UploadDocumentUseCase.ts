@@ -13,9 +13,9 @@ interface UploadDocumentRequest {
     mimetype: string;
     size: number;
   };
-  officeId: number; // ✅ Mudado de string para number (Correção do erro TS)
-  userId: number;   // ✅ Mudado de string para number
-  titulo?: string;  // ✅ Adicionado para receber o título do Controller
+  officeId: number; 
+  userId: number;  
+  titulo?: string; 
   vencimento?: string;
 }
 
